@@ -8,6 +8,7 @@ import type {
 } from 'n8n-workflow';
 import {
   firetellApiRequest,
+  firetellApiRequestAllItems,
   verifyWebhookSignature,
 } from './GenericFunctions';
 
@@ -34,8 +35,8 @@ export const FIRETELL_WEBHOOK_EVENTS = [
 
 /**
  * In-memory fallback cache keyed by webhook URL so Test mode ("Listen for Test Event")
- * still has access to the newly created signing secret even when n8n does not persist
- * workflowStaticData across manual test runs.
+ * and n8n Publish flows still have access to the signing secret even when n8n resets
+ * workflowStaticData across versions or manual test runs.
  */
 const inMemorySecretByUrl = new Map<string, string>();
 
@@ -45,6 +46,40 @@ function getStaticDataKeys(mode: string): { idKey: string; secretKey: string } {
     idKey: `webhookId_${suffix}`,
     secretKey: `webhookSecret_${suffix}`,
   };
+}
+
+async function listWebhooksByUrl(
+  ctx: IHookFunctions,
+  webhookUrl: string,
+): Promise<IDataObject[]> {
+  if (!webhookUrl) return [];
+  try {
+    const all = await firetellApiRequestAllItems.call(
+      ctx,
+      '/webhooks',
+      {},
+      true,
+      100,
+    );
+    return all.filter((w) => w.url === webhookUrl);
+  } catch {
+    return [];
+  }
+}
+
+async function safeDeleteWebhook(
+  ctx: IHookFunctions,
+  id: string,
+): Promise<void> {
+  try {
+    await firetellApiRequest.call(
+      ctx,
+      'DELETE',
+      `/webhooks/${encodeURIComponent(id)}`,
+    );
+  } catch {
+    // ignore cleanup errors if already deleted
+  }
 }
 
 export class FiretellTrigger implements INodeType {
@@ -131,17 +166,7 @@ export class FiretellTrigger implements INodeType {
         const mode = this.getMode();
         const { idKey, secretKey } = getStaticDataKeys(mode);
         const webhookUrl = this.getNodeWebhookUrl('default') || '';
-
-        const webhookId =
-          (webhookData[idKey] as string | undefined) ??
-          (mode !== 'manual'
-            ? (webhookData.webhookId as string | undefined)
-            : undefined);
-
-        if (!webhookId) {
-          return false;
-        }
-
+        const events = this.getNodeParameter('events') as string[];
         const verifySignature = this.getNodeParameter(
           'verifySignature',
           true,
@@ -149,6 +174,12 @@ export class FiretellTrigger implements INodeType {
         const options = (this.getNodeParameter('options', {}) ||
           {}) as IDataObject;
         const manualSecret = String(options.manualWebhookSecret || '').trim();
+
+        const storedId =
+          (webhookData[idKey] as string | undefined) ??
+          (mode !== 'manual'
+            ? (webhookData.webhookId as string | undefined)
+            : undefined);
         const storedSecret =
           (webhookData[secretKey] as string | undefined) ??
           (mode !== 'manual'
@@ -156,82 +187,79 @@ export class FiretellTrigger implements INodeType {
             : undefined) ??
           inMemorySecretByUrl.get(webhookUrl);
 
-        try {
-          const existing = await firetellApiRequest.call(
-            this,
-            'GET',
-            `/webhooks/${encodeURIComponent(webhookId)}`,
-          );
+        // Always look up existing webhooks matching this n8n URL so we never
+        // accumulate duplicates across Save/Publish cycles.
+        const matchingWebhooks = await listWebhooksByUrl(this, webhookUrl);
 
-          if (!existing?.id) {
-            delete webhookData[idKey];
-            delete webhookData[secretKey];
-            return false;
-          }
-
-          // Firetell's GET /webhooks/:id omits `secret` (select: false).
-          // If signature verification is enabled and we have no secret stored,
-          // recreate the webhook so we capture a fresh signing secret.
-          const resolvedSecret = existing.secret || storedSecret || manualSecret;
-          if (verifySignature && !resolvedSecret) {
-            try {
-              await firetellApiRequest.call(
-                this,
-                'DELETE',
-                `/webhooks/${encodeURIComponent(webhookId)}`,
-              );
-            } catch {
-              // ignore cleanup errors
-            }
-            delete webhookData[idKey];
-            delete webhookData[secretKey];
-            return false;
-          }
-
-          const events = this.getNodeParameter('events') as string[];
-          const existingEvents = Array.isArray(existing.events)
-            ? [...existing.events].sort()
-            : [];
-          const desiredEvents = [...events].sort();
-
-          if (
-            existing.url !== webhookUrl ||
-            JSON.stringify(existingEvents) !== JSON.stringify(desiredEvents)
-          ) {
-            const title =
-              (options.webhookTitle as string) ||
-              existing.title ||
-              `n8n - ${this.getWorkflow().name || 'Firetell Trigger'}`.slice(
-                0,
-                100,
-              );
-
-            await firetellApiRequest.call(
-              this,
-              'PATCH',
-              `/webhooks/${encodeURIComponent(webhookId)}`,
-              {
-                title,
-                url: webhookUrl,
-                events,
-              },
-            );
-          }
-
-          webhookData[idKey] = existing.id;
-          if (resolvedSecret) {
-            webhookData[secretKey] = resolvedSecret;
-            if (webhookUrl) {
-              inMemorySecretByUrl.set(webhookUrl, resolvedSecret);
-            }
-          }
-
-          return true;
-        } catch {
+        if (matchingWebhooks.length === 0) {
           delete webhookData[idKey];
           delete webhookData[secretKey];
           return false;
         }
+
+        // Prefer the webhook matching our stored ID (if still present), otherwise the newest one
+        const primary =
+          (storedId
+            ? matchingWebhooks.find((w) => String(w.id) === storedId)
+            : undefined) ?? matchingWebhooks[0];
+
+        // Delete any duplicate webhooks sharing the same URL
+        for (const dup of matchingWebhooks) {
+          if (dup.id && String(dup.id) !== String(primary.id)) {
+            await safeDeleteWebhook(this, String(dup.id));
+          }
+        }
+
+        // Firetell's GET /webhooks omits `secret` (select: false).
+        // If signature verification is enabled and we don't have the secret for `primary`,
+        // delete `primary` and return false so `create()` registers 1 fresh webhook with a known secret.
+        const resolvedSecret =
+          (primary.secret as string | undefined) || storedSecret || manualSecret;
+
+        if (verifySignature && !resolvedSecret) {
+          if (primary.id) {
+            await safeDeleteWebhook(this, String(primary.id));
+          }
+          delete webhookData[idKey];
+          delete webhookData[secretKey];
+          return false;
+        }
+
+        const existingEvents = Array.isArray(primary.events)
+          ? [...(primary.events as string[])].sort()
+          : [];
+        const desiredEvents = [...events].sort();
+        const desiredTitle = (
+          (options.webhookTitle as string) ||
+          (primary.title as string) ||
+          `n8n: ${this.getWorkflow().name || 'Workflow'}`
+        ).slice(0, 100);
+
+        if (
+          JSON.stringify(existingEvents) !== JSON.stringify(desiredEvents) ||
+          primary.title !== desiredTitle
+        ) {
+          await firetellApiRequest.call(
+            this,
+            'PATCH',
+            `/webhooks/${encodeURIComponent(String(primary.id))}`,
+            {
+              title: desiredTitle,
+              url: webhookUrl,
+              events,
+            },
+          );
+        }
+
+        webhookData[idKey] = String(primary.id);
+        if (resolvedSecret) {
+          webhookData[secretKey] = resolvedSecret;
+          if (webhookUrl) {
+            inMemorySecretByUrl.set(webhookUrl, resolvedSecret);
+          }
+        }
+
+        return true;
       },
 
       async create(this: IHookFunctions): Promise<boolean> {
@@ -282,7 +310,7 @@ export class FiretellTrigger implements INodeType {
         const { idKey, secretKey } = getStaticDataKeys(mode);
         const webhookUrl = this.getNodeWebhookUrl('default') || '';
 
-        const webhookId =
+        const storedId =
           (webhookData[idKey] as string | undefined) ??
           (mode !== 'manual'
             ? (webhookData.webhookId as string | undefined)
@@ -292,27 +320,28 @@ export class FiretellTrigger implements INodeType {
           inMemorySecretByUrl.delete(webhookUrl);
         }
 
-        if (!webhookId) {
-          delete webhookData[idKey];
-          delete webhookData[secretKey];
-          return true;
+        const idsToDelete = new Set<string>();
+        if (storedId) {
+          idsToDelete.add(storedId);
         }
 
-        try {
-          await firetellApiRequest.call(
-            this,
-            'DELETE',
-            `/webhooks/${encodeURIComponent(webhookId)}`,
-          );
-        } catch {
-          return false;
-        } finally {
-          delete webhookData[idKey];
-          delete webhookData[secretKey];
-          if (mode !== 'manual') {
-            delete webhookData.webhookId;
-            delete webhookData.webhookSecret;
+        // Also clean up any webhook matching this n8n URL in case staticData was cleared
+        const matchingWebhooks = await listWebhooksByUrl(this, webhookUrl);
+        for (const w of matchingWebhooks) {
+          if (w.id) {
+            idsToDelete.add(String(w.id));
           }
+        }
+
+        for (const id of idsToDelete) {
+          await safeDeleteWebhook(this, id);
+        }
+
+        delete webhookData[idKey];
+        delete webhookData[secretKey];
+        if (mode !== 'manual') {
+          delete webhookData.webhookId;
+          delete webhookData.webhookSecret;
         }
 
         return true;

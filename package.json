@@ -1,6 +1,6 @@
 {
   "name": "@firetell/n8n-nodes-firetell",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Official n8n community nodes for Firetell — programmable voice calls, SMS/MMS messaging, Voice AI agents, knowledge bases, contacts, and HMAC-verified webhook triggers.",
   "keywords": [
     "n8n-community-node-package",

@@ -2,6 +2,13 @@
 
 All notable changes to `@firetell/n8n-nodes-firetell` will be documented in this file.
 
+## [1.0.2] - 2026-11-19
+
+### Fixed
+- **Prevent duplicate webhooks on n8n Save / Publish**:
+  - `checkExists()` now queries `GET /api/v1/webhooks` by `webhookUrl`, automatically deduplicates any extra webhooks sharing the same n8n URL, and updates the existing webhook in-place (`PATCH`) when events change (or deletes & recreates cleanly if the signing secret is missing).
+  - `delete()` also removes any matching webhooks by `webhookUrl` so deactivating a workflow never leaves orphaned endpoints in Firetell Console.
+
 ## [1.0.1] - 2026-11-19
 
 ### Fixed
