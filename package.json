@@ -1,0 +1,72 @@
+{
+  "name": "@firetell/n8n-nodes-firetell",
+  "version": "1.0.0",
+  "description": "Official n8n community nodes for Firetell — programmable voice calls, SMS/MMS messaging, Voice AI agents, knowledge bases, contacts, and HMAC-verified webhook triggers.",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "firetell",
+    "voip",
+    "voice",
+    "voice-ai",
+    "sms",
+    "mms",
+    "telephony",
+    "webhooks",
+    "call-center"
+  ],
+  "license": "MIT",
+  "homepage": "https://firetell.com/docs/developers/rest-api/overview",
+  "author": {
+    "name": "Firetell",
+    "email": "developers@firetell.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/firetellcom/firetell-n8n-nodes.git"
+  },
+  "bugs": {
+    "url": "https://github.com/firetellcom/firetell-n8n-nodes/issues"
+  },
+  "main": "index.js",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
+    "release": "npm run typecheck && npm run test && npm run build && npm publish --access=public --registry=https://registry.npmjs.org/"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/FiretellApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Firetell/Firetell.node.js",
+      "dist/nodes/Firetell/FiretellTrigger.node.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "n8n-workflow": "^1.82.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

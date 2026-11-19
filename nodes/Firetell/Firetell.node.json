@@ -1,0 +1,19 @@
+{
+  "node": "n8n-nodes-base.firetell",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": ["Communication", "Sales", "Development"],
+  "resources": {
+    "credentialDocumentation": [
+      {
+        "url": "https://firetell.com/docs/developers/getting-started/authentication"
+      }
+    ],
+    "primaryDocumentation": [
+      {
+        "url": "https://firetell.com/docs/developers/rest-api/overview"
+      }
+    ]
+  },
+  "alias": ["voip", "voice", "sms", "call", "voice ai", "telephony", "firetell"]
+}
