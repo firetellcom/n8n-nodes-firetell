@@ -2,6 +2,15 @@
 
 All notable changes to `@firetell/n8n-nodes-firetell` will be documented in this file.
 
+## [1.0.1] - 2026-11-19
+
+### Fixed
+- **FiretellTrigger signature verification & Test vs. Production mode**:
+  - Separated `workflowStaticData` keys (`webhookId_test`/`webhookSecret_test` vs. `webhookId_prod`/`webhookSecret_prod`) so Test mode ("Listen for Test Event") and Production mode no longer overwrite or delete each other's webhook subscriptions.
+  - Added an in-memory URL-keyed secret fallback cache for manual Test runs where n8n does not persist `workflowStaticData`.
+  - In `checkExists`, automatically recreate the Firetell webhook if `verifySignature` is enabled and no signing secret is stored (since `GET /api/v1/webhooks/:id` omits `secret`).
+  - Added fallback HMAC-SHA256 verification against `JSON.stringify(body)` when `req.rawBody` is missing or empty, plus clearer `401` diagnostic messages.
+
 ## [1.0.0] - 2026-11-19
 
 ### Added

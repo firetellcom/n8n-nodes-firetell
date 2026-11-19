@@ -62,9 +62,13 @@ describe('FiretellTrigger webhook verification', () => {
     signature?: string;
     verifySignature?: boolean;
     events?: string[];
+    mode?: string;
+    secret?: string;
+    rawBody?: string | Buffer;
   }) {
     const statusMock = vi.fn().mockReturnThis();
     const jsonMock = vi.fn().mockReturnThis();
+    const mode = opts.mode ?? 'trigger';
     const params: Record<string, unknown> = {
       verifySignature: opts.verifySignature ?? true,
       events: opts.events ?? ['call.ended'],
@@ -75,14 +79,23 @@ describe('FiretellTrigger webhook verification', () => {
       statusMock,
       jsonMock,
       ctx: {
-        getRequestObject: () => ({ rawBody }),
+        getMode: () => mode,
+        getNodeWebhookUrl: () => 'https://n8n.example.com/webhook/abc',
+        getRequestObject: () => ({
+          rawBody: opts.rawBody !== undefined ? opts.rawBody : rawBody,
+          headers: opts.signature
+            ? { 'x-webhook-signature': opts.signature }
+            : {},
+        }),
         getResponseObject: () => ({ status: statusMock, json: jsonMock }),
         getBodyData: () => payload,
         getHeaderData: () =>
           opts.signature ? { 'x-webhook-signature': opts.signature } : {},
         getNodeParameter: (name: string, fallback?: unknown) =>
           params[name] ?? fallback,
-        getWorkflowStaticData: () => ({ webhookSecret: secret }),
+        getWorkflowStaticData: () => ({
+          webhookSecret_prod: opts.secret !== undefined ? opts.secret : secret,
+        }),
         helpers: {
           returnJsonArray: (data: unknown) => [{ json: data }],
         },
@@ -98,6 +111,17 @@ describe('FiretellTrigger webhook verification', () => {
     expect(result.workflowData?.[0]?.[0]?.json).toEqual(payload);
   });
 
+  it('falls back to JSON.stringify(body) when req.rawBody is missing', async () => {
+    const { ctx, statusMock } = makeWebhookContext({
+      signature: validSig,
+      rawBody: '',
+    });
+    const result = await trigger.webhook.call(ctx);
+
+    expect(statusMock).not.toHaveBeenCalled();
+    expect(result.workflowData?.[0]?.[0]?.json).toEqual(payload);
+  });
+
   it('rejects with HTTP 401 when X-Webhook-Signature is invalid', async () => {
     const { ctx, statusMock, jsonMock } = makeWebhookContext({
       signature: 'bad_signature',
@@ -106,7 +130,7 @@ describe('FiretellTrigger webhook verification', () => {
 
     expect(statusMock).toHaveBeenCalledWith(401);
     expect(jsonMock).toHaveBeenCalledWith({
-      error: 'Invalid or missing X-Webhook-Signature header',
+      error: 'Invalid X-Webhook-Signature header',
     });
     expect(result).toEqual({ noWebhookResponse: true });
   });

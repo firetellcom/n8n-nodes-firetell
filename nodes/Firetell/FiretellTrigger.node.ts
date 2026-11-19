@@ -32,6 +32,21 @@ export const FIRETELL_WEBHOOK_EVENTS = [
   { name: 'Workspace Credit Updated', value: 'workspace.credit.updated' },
 ];
 
+/**
+ * In-memory fallback cache keyed by webhook URL so Test mode ("Listen for Test Event")
+ * still has access to the newly created signing secret even when n8n does not persist
+ * workflowStaticData across manual test runs.
+ */
+const inMemorySecretByUrl = new Map<string, string>();
+
+function getStaticDataKeys(mode: string): { idKey: string; secretKey: string } {
+  const suffix = mode === 'manual' ? 'test' : 'prod';
+  return {
+    idKey: `webhookId_${suffix}`,
+    secretKey: `webhookSecret_${suffix}`,
+  };
+}
+
 export class FiretellTrigger implements INodeType {
   description: INodeTypeDescription = {
     displayName: 'Firetell Trigger',
@@ -113,11 +128,33 @@ export class FiretellTrigger implements INodeType {
     default: {
       async checkExists(this: IHookFunctions): Promise<boolean> {
         const webhookData = this.getWorkflowStaticData('node');
-        const webhookId = webhookData.webhookId as string | undefined;
+        const mode = this.getMode();
+        const { idKey, secretKey } = getStaticDataKeys(mode);
+        const webhookUrl = this.getNodeWebhookUrl('default') || '';
+
+        const webhookId =
+          (webhookData[idKey] as string | undefined) ??
+          (mode !== 'manual'
+            ? (webhookData.webhookId as string | undefined)
+            : undefined);
 
         if (!webhookId) {
           return false;
         }
+
+        const verifySignature = this.getNodeParameter(
+          'verifySignature',
+          true,
+        ) as boolean;
+        const options = (this.getNodeParameter('options', {}) ||
+          {}) as IDataObject;
+        const manualSecret = String(options.manualWebhookSecret || '').trim();
+        const storedSecret =
+          (webhookData[secretKey] as string | undefined) ??
+          (mode !== 'manual'
+            ? (webhookData.webhookSecret as string | undefined)
+            : undefined) ??
+          inMemorySecretByUrl.get(webhookUrl);
 
         try {
           const existing = await firetellApiRequest.call(
@@ -127,12 +164,30 @@ export class FiretellTrigger implements INodeType {
           );
 
           if (!existing?.id) {
-            delete webhookData.webhookId;
-            delete webhookData.webhookSecret;
+            delete webhookData[idKey];
+            delete webhookData[secretKey];
             return false;
           }
 
-          const webhookUrl = this.getNodeWebhookUrl('default');
+          // Firetell's GET /webhooks/:id omits `secret` (select: false).
+          // If signature verification is enabled and we have no secret stored,
+          // recreate the webhook so we capture a fresh signing secret.
+          const resolvedSecret = existing.secret || storedSecret || manualSecret;
+          if (verifySignature && !resolvedSecret) {
+            try {
+              await firetellApiRequest.call(
+                this,
+                'DELETE',
+                `/webhooks/${encodeURIComponent(webhookId)}`,
+              );
+            } catch {
+              // ignore cleanup errors
+            }
+            delete webhookData[idKey];
+            delete webhookData[secretKey];
+            return false;
+          }
+
           const events = this.getNodeParameter('events') as string[];
           const existingEvents = Array.isArray(existing.events)
             ? [...existing.events].sort()
@@ -143,8 +198,6 @@ export class FiretellTrigger implements INodeType {
             existing.url !== webhookUrl ||
             JSON.stringify(existingEvents) !== JSON.stringify(desiredEvents)
           ) {
-            const options = (this.getNodeParameter('options', {}) ||
-              {}) as IDataObject;
             const title =
               (options.webhookTitle as string) ||
               existing.title ||
@@ -165,27 +218,33 @@ export class FiretellTrigger implements INodeType {
             );
           }
 
-          if (existing.secret && !webhookData.webhookSecret) {
-            webhookData.webhookSecret = existing.secret;
+          webhookData[idKey] = existing.id;
+          if (resolvedSecret) {
+            webhookData[secretKey] = resolvedSecret;
+            if (webhookUrl) {
+              inMemorySecretByUrl.set(webhookUrl, resolvedSecret);
+            }
           }
 
           return true;
         } catch {
-          delete webhookData.webhookId;
-          delete webhookData.webhookSecret;
+          delete webhookData[idKey];
+          delete webhookData[secretKey];
           return false;
         }
       },
 
       async create(this: IHookFunctions): Promise<boolean> {
-        const webhookUrl = this.getNodeWebhookUrl('default');
+        const webhookUrl = this.getNodeWebhookUrl('default') || '';
         const events = this.getNodeParameter('events') as string[];
         const options = (this.getNodeParameter('options', {}) ||
           {}) as IDataObject;
         const workflowName = this.getWorkflow().name || 'Workflow';
+        const mode = this.getMode();
+        const modeSuffix = mode === 'manual' ? ' (test)' : '';
         const title = (
           (options.webhookTitle as string) ||
-          `n8n: ${workflowName}`
+          `n8n: ${workflowName}${modeSuffix}`
         ).slice(0, 100);
 
         const response = await firetellApiRequest.call(
@@ -204,9 +263,14 @@ export class FiretellTrigger implements INodeType {
         }
 
         const webhookData = this.getWorkflowStaticData('node');
-        webhookData.webhookId = response.id;
+        const { idKey, secretKey } = getStaticDataKeys(mode);
+
+        webhookData[idKey] = response.id;
         if (response.secret) {
-          webhookData.webhookSecret = response.secret;
+          webhookData[secretKey] = response.secret;
+          if (webhookUrl) {
+            inMemorySecretByUrl.set(webhookUrl, String(response.secret));
+          }
         }
 
         return true;
@@ -214,9 +278,23 @@ export class FiretellTrigger implements INodeType {
 
       async delete(this: IHookFunctions): Promise<boolean> {
         const webhookData = this.getWorkflowStaticData('node');
-        const webhookId = webhookData.webhookId as string | undefined;
+        const mode = this.getMode();
+        const { idKey, secretKey } = getStaticDataKeys(mode);
+        const webhookUrl = this.getNodeWebhookUrl('default') || '';
+
+        const webhookId =
+          (webhookData[idKey] as string | undefined) ??
+          (mode !== 'manual'
+            ? (webhookData.webhookId as string | undefined)
+            : undefined);
+
+        if (webhookUrl) {
+          inMemorySecretByUrl.delete(webhookUrl);
+        }
 
         if (!webhookId) {
+          delete webhookData[idKey];
+          delete webhookData[secretKey];
           return true;
         }
 
@@ -229,8 +307,12 @@ export class FiretellTrigger implements INodeType {
         } catch {
           return false;
         } finally {
-          delete webhookData.webhookId;
-          delete webhookData.webhookSecret;
+          delete webhookData[idKey];
+          delete webhookData[secretKey];
+          if (mode !== 'manual') {
+            delete webhookData.webhookId;
+            delete webhookData.webhookSecret;
+          }
         }
 
         return true;
@@ -256,21 +338,54 @@ export class FiretellTrigger implements INodeType {
       const options = (this.getNodeParameter('options', {}) ||
         {}) as IDataObject;
       const webhookData = this.getWorkflowStaticData('node');
+      const mode = this.getMode();
+      const { secretKey } = getStaticDataKeys(mode);
+      const webhookUrl = this.getNodeWebhookUrl('default') || '';
+
+      const manualSecret = String(options.manualWebhookSecret || '').trim();
       const secret =
-        (options.manualWebhookSecret as string) ||
-        (webhookData.webhookSecret as string | undefined);
+        manualSecret ||
+        (webhookData[secretKey] as string | undefined) ||
+        (webhookData.webhookSecret as string | undefined) ||
+        inMemorySecretByUrl.get(webhookUrl);
 
       const rawHeader =
-        headers['x-webhook-signature'] ?? headers['X-Webhook-Signature'];
+        headers['x-webhook-signature'] ??
+        headers['X-Webhook-Signature'] ??
+        (req.headers?.['x-webhook-signature'] as
+          | string
+          | string[]
+          | undefined);
       const signature = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
 
-      const rawBody: string | Buffer =
-        (req as unknown as { rawBody?: string | Buffer }).rawBody ??
-        JSON.stringify(body);
-
-      if (!verifyWebhookSignature(rawBody, signature, secret)) {
+      if (!signature) {
         res.status(401).json({
-          error: 'Invalid or missing X-Webhook-Signature header',
+          error: 'Missing X-Webhook-Signature header',
+        });
+        return { noWebhookResponse: true };
+      }
+
+      if (!secret) {
+        res.status(401).json({
+          error:
+            'Webhook signing secret not found. Deactivate and reactivate the workflow, or set Manual Webhook Secret in Options.',
+        });
+        return { noWebhookResponse: true };
+      }
+
+      const reqRawBody = (req as unknown as { rawBody?: string | Buffer })
+        .rawBody;
+      const jsonBody = JSON.stringify(body);
+
+      const isValid =
+        (reqRawBody !== undefined &&
+          reqRawBody.length > 0 &&
+          verifyWebhookSignature(reqRawBody, signature, secret)) ||
+        verifyWebhookSignature(jsonBody, signature, secret);
+
+      if (!isValid) {
+        res.status(401).json({
+          error: 'Invalid X-Webhook-Signature header',
         });
         return { noWebhookResponse: true };
       }
