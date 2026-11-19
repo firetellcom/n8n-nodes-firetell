@@ -2,6 +2,11 @@
 
 All notable changes to `@firetell/n8n-nodes-firetell` will be documented in this file.
 
+## [1.0.3] - 2026-11-19
+
+### Changed
+- Upgraded `n8n-workflow` devDependency to `^2.16.0` for full type-checking and compatibility with modern n8n v2/v3 runtimes (while preserving `peerDependencies: { "n8n-workflow": "*" }` for backward compatibility with n8n v1).
+
 ## [1.0.2] - 2026-11-19
 
 ### Fixed
